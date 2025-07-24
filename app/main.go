@@ -7,7 +7,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+var DB sync.Map
+
+func Start() {
+	DB = sync.Map{}
+}
 
 func main() {
 	fmt.Println("Logs from program will appear here!")
@@ -16,6 +23,10 @@ func main() {
 		fmt.Println("Failed to bind to port 6379")
 		os.Exit(1)
 	}
+
+	// start the db
+	go Start()
+
 	// accepting a connection to keep the server running
 	for {
 		conn, err := l.Accept()
@@ -94,7 +105,28 @@ func handleCommand(conn net.Conn) {
 				response := fmt.Sprintf("$%d\r\n%s\r\n", len(args[1]), args[1])
 				conn.Write([]byte(response))
 			}
+		case "SET":
+			if len(args) < 3 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
+			} else {
+				key := args[1]
+				value := args[2]
+				DB.Store(key, value)
+				conn.Write([]byte("+OK\r\n"))
+			}
+		case "GET":
+			if len(args) < 2 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
+			} else {
+				key := args[1]
+				value, ok := DB.Load(key)
+				if ok {
+					response := fmt.Sprintf("$%d\r\n%s\r\n", len(value.(string)), value.(string))
+					conn.Write([]byte(response))
+				} else {
+					conn.Write([]byte("$-1\r\n"))
+				}
+			}
 		}
-
 	}
 }
