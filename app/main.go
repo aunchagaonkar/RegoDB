@@ -8,7 +8,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
+
+// this is a struct that represents the key-value pair with minimal fields
+// more fields will be added as necessary
+type Entry struct {
+	value     string
+	expiresAt time.Time
+}
 
 var DB sync.Map
 
@@ -111,22 +119,46 @@ func handleCommand(conn net.Conn) {
 			} else {
 				key := args[1]
 				value := args[2]
-				DB.Store(key, value)
+				// check for optional PX argument
+				var expiresAt = time.Time{} // zero time. Will not expire by default
+				if len(args) > 4 {
+					for i := 3; i < len(args)-1; i++ {
+						if strings.ToUpper(args[i]) == "PX" {
+							ms, err := strconv.Atoi(args[i+1])
+							if err != nil {
+								conn.Write([]byte("-ERR PX value must be integer\r\n"))
+								return
+							}
+							expiresAt = time.Now().Add(time.Duration(ms) * time.Millisecond)
+						}
+					}
+				}
+				// if no expiration is set, use a zero time.Time value.
+				entry := Entry{value: value, expiresAt: expiresAt}
+				DB.Store(key, entry)
 				conn.Write([]byte("+OK\r\n"))
 			}
 		case "GET":
 			if len(args) < 2 {
 				conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
-			} else {
-				key := args[1]
-				value, ok := DB.Load(key)
-				if ok {
-					response := fmt.Sprintf("$%d\r\n%s\r\n", len(value.(string)), value.(string))
-					conn.Write([]byte(response))
-				} else {
-					conn.Write([]byte("$-1\r\n"))
-				}
+				continue
 			}
+			key := args[1]
+			value, ok := DB.Load(key)
+			if !ok {
+				conn.Write([]byte("$-1\r\n"))
+				continue
+			}
+
+			entry := value.(Entry)
+			if !entry.expiresAt.IsZero() && time.Now().After(entry.expiresAt) {
+				DB.Delete(key)
+				conn.Write([]byte("$-1\r\n"))
+				continue
+			}
+
+			response := fmt.Sprintf("$%d\r\n%s\r\n", len(entry.value), entry.value)
+			conn.Write([]byte(response))
 		}
 	}
 }
