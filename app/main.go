@@ -18,6 +18,12 @@ type Entry struct {
 	expiresAt time.Time
 }
 
+// ListEntry represents a list data structure
+type ListEntry struct {
+	elements  []string
+	expiresAt time.Time
+}
+
 var DB sync.Map
 
 func Start() {
@@ -25,7 +31,7 @@ func Start() {
 }
 
 func main() {
-	fmt.Println("Logs from program will appear here!")
+	fmt.Println("Logs from your program will appear here!")
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
 		fmt.Println("Failed to bind to port 6379")
@@ -35,7 +41,7 @@ func main() {
 	// start the db
 	go Start()
 
-	// accepting a connection to keep the server running
+	// Accepting a connection to keep the server running
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -119,6 +125,7 @@ func handleCommand(conn net.Conn) {
 			} else {
 				key := args[1]
 				value := args[2]
+
 				// check for optional PX argument
 				var expiresAt = time.Time{} // zero time. Will not expire by default
 				if len(args) > 4 {
@@ -158,6 +165,36 @@ func handleCommand(conn net.Conn) {
 			}
 
 			response := fmt.Sprintf("$%d\r\n%s\r\n", len(entry.value), entry.value)
+			conn.Write([]byte(response))
+		case "RPUSH":
+			if len(args) < 3 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'rpush' command\r\n"))
+				continue
+			}
+			key := args[1]
+			element := args[2]
+
+			value, exists := DB.Load(key)
+			var listEntry ListEntry
+
+			if exists {
+				var ok bool
+				listEntry, ok = value.(ListEntry)
+				if !ok {
+					conn.Write([]byte("-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n"))
+					continue
+				}
+			} else {
+				// key doesn't exist, create new list
+				listEntry = ListEntry{elements: make([]string, 0)}
+			}
+
+			// append element to the list
+			listEntry.elements = append(listEntry.elements, element)
+			DB.Store(key, listEntry)
+
+			// return the number of elements in the list as RESP integer
+			response := fmt.Sprintf(":%d\r\n", len(listEntry.elements))
 			conn.Write([]byte(response))
 		}
 	}
