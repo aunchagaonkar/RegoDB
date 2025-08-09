@@ -30,6 +30,33 @@ func Start() {
 	DB = sync.Map{}
 }
 
+// RESP protocol response helpers
+func writeSimpleString(conn net.Conn, str string) error {
+	_, err := conn.Write([]byte("+" + str + "\r\n"))
+	return err
+}
+
+func writeBulkString(conn net.Conn, str string) error {
+	response := fmt.Sprintf("$%d\r\n%s\r\n", len(str), str)
+	_, err := conn.Write([]byte(response))
+	return err
+}
+
+func writeNullBulkString(conn net.Conn) error {
+	_, err := conn.Write([]byte("$-1\r\n"))
+	return err
+}
+
+func writeInteger(conn net.Conn, val int) error {
+	_, err := conn.Write([]byte(fmt.Sprintf(":%d\r\n", val)))
+	return err
+}
+
+func writeError(conn net.Conn, msg string) error {
+	_, err := conn.Write([]byte("-ERR " + msg + "\r\n"))
+	return err
+}
+
 func main() {
 	fmt.Println("Logs from your program will appear here!")
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
@@ -65,14 +92,14 @@ func handleCommand(conn net.Conn) {
 		line = strings.TrimSpace(line)
 
 		if !strings.HasPrefix(line, "*") {
-			conn.Write([]byte("-ERR protocol error '" + line + "'\r\n"))
+			writeError(conn, "protocol error '"+line+"'")
 		}
 
 		// get the number of arguments
 		argCount, err := strconv.Atoi(line[1:])
 
 		if err != nil || argCount < 1 {
-			conn.Write([]byte("-ERR invalid array\r\n"))
+			writeError(conn, "invalid array")
 			return
 		}
 
@@ -86,20 +113,20 @@ func handleCommand(conn net.Conn) {
 			// read the length line
 			lenLine, err := reader.ReadString('\n')
 			if err != nil || !strings.HasPrefix(lenLine, "$") {
-				conn.Write([]byte("-ERR invalid bulk string\r\n"))
+				writeError(conn, "invalid bulk string")
 				return
 			}
 			// remove the '$' and trailing spaces
 			strLen, err := strconv.Atoi(strings.TrimSpace(lenLine[1:]))
 			if err != nil {
-				conn.Write([]byte("-ERR invalid bulk string length\r\n"))
+				writeError(conn, "invalid bulk string length")
 				return
 			}
 			// read the actual string data
 			buf := make([]byte, strLen+2)
 			_, err = reader.Read(buf)
 			if err != nil {
-				conn.Write([]byte("-ERR failed to read argument\r\n"))
+				writeError(conn, "failed to read argument")
 				return
 			}
 			// append the string to args
@@ -111,17 +138,16 @@ func handleCommand(conn net.Conn) {
 
 		switch command {
 		case "PING":
-			conn.Write([]byte("+PONG\r\n"))
+			writeSimpleString(conn, "PONG")
 		case "ECHO":
 			if len(args) < 2 {
-				conn.Write([]byte("-ERR wrong number of arguments for 'echo' command\r\n"))
+				writeError(conn, "wrong number of arguments for 'echo' command")
 			} else {
-				response := fmt.Sprintf("$%d\r\n%s\r\n", len(args[1]), args[1])
-				conn.Write([]byte(response))
+				writeBulkString(conn, args[1])
 			}
 		case "SET":
 			if len(args) < 3 {
-				conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
+				writeError(conn, "wrong number of arguments for 'set' command")
 			} else {
 				key := args[1]
 				value := args[2]
@@ -133,7 +159,7 @@ func handleCommand(conn net.Conn) {
 						if strings.ToUpper(args[i]) == "PX" {
 							ms, err := strconv.Atoi(args[i+1])
 							if err != nil {
-								conn.Write([]byte("-ERR PX value must be integer\r\n"))
+								writeError(conn, "PX value must be integer")
 								return
 							}
 							expiresAt = time.Now().Add(time.Duration(ms) * time.Millisecond)
@@ -143,32 +169,31 @@ func handleCommand(conn net.Conn) {
 				// if no expiration is set, use a zero time.Time value.
 				entry := Entry{value: value, expiresAt: expiresAt}
 				DB.Store(key, entry)
-				conn.Write([]byte("+OK\r\n"))
+				writeSimpleString(conn, "OK")
 			}
 		case "GET":
 			if len(args) < 2 {
-				conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
+				writeError(conn, "wrong number of arguments for 'get' command")
 				continue
 			}
 			key := args[1]
 			value, ok := DB.Load(key)
 			if !ok {
-				conn.Write([]byte("$-1\r\n"))
+				writeNullBulkString(conn)
 				continue
 			}
 
 			entry := value.(Entry)
 			if !entry.expiresAt.IsZero() && time.Now().After(entry.expiresAt) {
 				DB.Delete(key)
-				conn.Write([]byte("$-1\r\n"))
+				writeNullBulkString(conn)
 				continue
 			}
 
-			response := fmt.Sprintf("$%d\r\n%s\r\n", len(entry.value), entry.value)
-			conn.Write([]byte(response))
+			writeBulkString(conn, entry.value)
 		case "RPUSH":
 			if len(args) < 3 {
-				conn.Write([]byte("-ERR wrong number of arguments for 'rpush' command\r\n"))
+				writeError(conn, "wrong number of arguments for 'rpush' command")
 				continue
 			}
 			key := args[1]
@@ -181,7 +206,7 @@ func handleCommand(conn net.Conn) {
 				var ok bool
 				listEntry, ok = value.(ListEntry)
 				if !ok {
-					conn.Write([]byte("-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n"))
+					writeError(conn, "WRONGTYPE Operation against a key holding the wrong kind of value")
 					continue
 				}
 			} else {
@@ -193,9 +218,8 @@ func handleCommand(conn net.Conn) {
 			listEntry.elements = append(listEntry.elements, element)
 			DB.Store(key, listEntry)
 
-			// return the number of elements in the list as RESP integer
-			response := fmt.Sprintf(":%d\r\n", len(listEntry.elements))
-			conn.Write([]byte(response))
+			// return the number of elements in the list
+			writeInteger(conn, len(listEntry.elements))
 		}
 	}
 }
