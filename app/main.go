@@ -35,11 +35,12 @@ type CommandHandler func(args []string, conn net.Conn)
 
 // Map of command names to their handler functions
 var commandHandlers = map[string]CommandHandler{
-	"PING":  handlePing,
-	"ECHO":  handleEcho,
-	"SET":   handleSet,
-	"GET":   handleGet,
-	"RPUSH": handleRPush,
+	"PING":   handlePing,
+	"ECHO":   handleEcho,
+	"SET":    handleSet,
+	"GET":    handleGet,
+	"RPUSH":  handleRPush,
+	"LRANGE": handleLRange,
 }
 
 // RESP protocol response helpers
@@ -66,6 +67,16 @@ func writeInteger(conn net.Conn, val int) error {
 
 func writeError(conn net.Conn, msg string) error {
 	_, err := conn.Write([]byte("-ERR " + msg + "\r\n"))
+	return err
+}
+
+// function to write an RESP array
+func writeArray(conn net.Conn, elems []string) error {
+	out := fmt.Sprintf("*%d\r\n", len(elems))
+	for _, e := range elems {
+		out += fmt.Sprintf("$%d\r\n%s\r\n", len(e), e)
+	}
+	_, err := conn.Write([]byte(out))
 	return err
 }
 
@@ -265,4 +276,57 @@ func handleRPush(args []string, conn net.Conn) {
 
 	// return the number of elements in the list
 	writeInteger(conn, len(listEntry.elements))
+}
+
+// lists elements of a list between start and stop indexes
+func handleLRange(args []string, conn net.Conn) {
+	if len(args) != 4 {
+		writeError(conn, "wrong number of arguments for 'lrange' command")
+		return
+	}
+
+	key := args[1]
+	start, err := strconv.Atoi(args[2])
+	if err != nil || start < 0 {
+		writeError(conn, "invalid start index")
+		return
+	}
+	stop, err := strconv.Atoi(args[3])
+	if err != nil || stop < 0 {
+		writeError(conn, "invalid stop index")
+		return
+	}
+
+	// retrieve the list from the DB
+	value, exists := DB.Load(key)
+	if !exists {
+		// if list doesn't exist, return an empty array
+		writeArray(conn, []string{})
+		return
+	}
+
+	listEntry, ok := value.(ListEntry)
+	if !ok {
+		writeError(conn, "WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+
+	elems := listEntry.elements
+	if start >= len(elems) {
+		writeArray(conn, []string{})
+		return
+	}
+
+	// adjust stop index if it exceeds the list length
+	if stop >= len(elems) {
+		stop = len(elems) - 1
+	}
+
+	if start > stop {
+		writeArray(conn, []string{})
+		return
+	}
+
+	result := elems[start : stop+1]
+	writeArray(conn, result)
 }
