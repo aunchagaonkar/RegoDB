@@ -34,5 +34,7 @@ flowchart TD
 ](03_resp_protocol_handlers_.md)
 4. [Specific Command Implementations
 ](04_specific_command_implementations_.md)
+5. [Data Store
+](05_data_store_.md)
 
 ---
