@@ -28,5 +28,7 @@ flowchart TD
 
 1. [Network Listener
 ](01_network_listener_.md)
+2. [Command Dispatcher
+](02_command_dispatcher_.md)
 
 ---
