@@ -41,6 +41,7 @@ var commandHandlers = map[string]CommandHandler{
 	"GET":    handleGet,
 	"RPUSH":  handleRPush,
 	"LRANGE": handleLRange,
+	"LLEN":   handleLLen,
 	"LPUSH":  handleLPush,
 }
 
@@ -376,4 +377,24 @@ func handleLRange(args []string, conn net.Conn) {
 
 	result := elems[start : stop+1]
 	writeArray(conn, result)
+}
+
+// returns the number of elements in a list
+func handleLLen(args []string, conn net.Conn) {
+	if len(args) != 2 {
+		writeError(conn, "wrong number of arguments for 'llen' command")
+		return
+	}
+	key := args[1]
+	value, exists := DB.Load(key)
+	if !exists {
+		writeInteger(conn, 0)
+		return
+	}
+	listEntry, ok := value.(ListEntry)
+	if !ok {
+		writeError(conn, "WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	writeInteger(conn, len(listEntry.elements))
 }
