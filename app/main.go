@@ -278,7 +278,7 @@ func handleRPush(args []string, conn net.Conn) {
 	writeInteger(conn, len(listEntry.elements))
 }
 
-// lists elements of a list between start and stop indexes
+// lists elements of a list between start and stop indexes, also supporting negative indexes
 func handleLRange(args []string, conn net.Conn) {
 	if len(args) != 4 {
 		writeError(conn, "wrong number of arguments for 'lrange' command")
@@ -287,12 +287,12 @@ func handleLRange(args []string, conn net.Conn) {
 
 	key := args[1]
 	start, err := strconv.Atoi(args[2])
-	if err != nil || start < 0 {
+	if err != nil {
 		writeError(conn, "invalid start index")
 		return
 	}
 	stop, err := strconv.Atoi(args[3])
-	if err != nil || stop < 0 {
+	if err != nil {
 		writeError(conn, "invalid stop index")
 		return
 	}
@@ -312,14 +312,25 @@ func handleLRange(args []string, conn net.Conn) {
 	}
 
 	elems := listEntry.elements
-	if start >= len(elems) {
+	listLen := len(elems)
+
+	// handle negative indexes
+	if start < 0 {
+		start = max(listLen+start, 0)
+	}
+	if stop < 0 {
+		stop = max(listLen+stop, 0)
+	}
+
+	// if start index is out of range, return empty array
+	if start >= listLen {
 		writeArray(conn, []string{})
 		return
 	}
 
 	// adjust stop index if it exceeds the list length
-	if stop >= len(elems) {
-		stop = len(elems) - 1
+	if stop >= listLen {
+		stop = listLen - 1
 	}
 
 	if start > stop {
