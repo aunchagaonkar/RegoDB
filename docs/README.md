@@ -30,5 +30,7 @@ flowchart TD
 ](01_network_listener_.md)
 2. [Command Dispatcher
 ](02_command_dispatcher_.md)
+3. [RESP Protocol Handlers
+](03_resp_protocol_handlers_.md)
 
 ---
