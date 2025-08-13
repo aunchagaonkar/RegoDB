@@ -32,5 +32,7 @@ flowchart TD
 ](02_command_dispatcher_.md)
 3. [RESP Protocol Handlers
 ](03_resp_protocol_handlers_.md)
+4. [Specific Command Implementations
+](04_specific_command_implementations_.md)
 
 ---
