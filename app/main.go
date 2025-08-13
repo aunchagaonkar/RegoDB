@@ -41,6 +41,7 @@ var commandHandlers = map[string]CommandHandler{
 	"GET":    handleGet,
 	"RPUSH":  handleRPush,
 	"LRANGE": handleLRange,
+	"LPUSH":  handleLPush,
 }
 
 // RESP protocol response helpers
@@ -270,6 +271,41 @@ func handleRPush(args []string, conn net.Conn) {
 	// Append all elements to the list (support for multiple values)
 	for i := 2; i < len(args); i++ {
 		listEntry.elements = append(listEntry.elements, args[i])
+	}
+
+	DB.Store(key, listEntry)
+
+	// return the number of elements in the list
+	writeInteger(conn, len(listEntry.elements))
+}
+
+// prepends elements to a list
+func handleLPush(args []string, conn net.Conn) {
+	if len(args) < 3 {
+		writeError(conn, "wrong number of arguments for 'lpush' command")
+		return
+	}
+
+	key := args[1]
+	value, exists := DB.Load(key)
+	var listEntry ListEntry
+
+	if exists {
+		var ok bool
+		listEntry, ok = value.(ListEntry)
+		if !ok {
+			writeError(conn, "WRONGTYPE Operation against a key holding the wrong kind of value")
+			return
+		}
+	} else {
+		// key doesn't exist, create new list
+		listEntry = ListEntry{elements: make([]string, 0)}
+	}
+
+	// prepend all elements to the list (support for multiple values)
+	for i := 2; i < len(args); i++ {
+		// insert the element at the beginning
+		listEntry.elements = append([]string{args[i]}, listEntry.elements...)
 	}
 
 	DB.Store(key, listEntry)
