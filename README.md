@@ -1,2 +1,2 @@
-# Redigo
+# RegoDB
 Redis written in Go
