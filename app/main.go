@@ -43,6 +43,7 @@ var commandHandlers = map[string]CommandHandler{
 	"LRANGE": handleLRange,
 	"LLEN":   handleLLen,
 	"LPUSH":  handleLPush,
+	"LPOP":   handleLPop, // Add LPOP handler
 }
 
 // RESP protocol response helpers
@@ -313,6 +314,51 @@ func handleLPush(args []string, conn net.Conn) {
 
 	// return the number of elements in the list
 	writeInteger(conn, len(listEntry.elements))
+}
+
+// handleLPop removes and returns the first element of a list
+func handleLPop(args []string, conn net.Conn) {
+	if len(args) != 2 {
+		writeError(conn, "wrong number of arguments for 'lpop' command")
+		return
+	}
+	key := args[1]
+
+	// retrieve the list from the DB
+	value, exists := DB.Load(key)
+	if !exists {
+		writeNullBulkString(conn)
+		return
+	}
+
+	listEntry, ok := value.(ListEntry)
+	if !ok {
+		writeError(conn, "WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+
+	// if the list is empty, return null
+	if len(listEntry.elements) == 0 {
+		writeNullBulkString(conn)
+		return
+	}
+
+	// get the first element to return
+	firstElement := listEntry.elements[0]
+
+	// remove the first element from the slice
+	listEntry.elements = listEntry.elements[1:]
+
+	// if the list becomes empty after popping, remove the key from the DB
+	if len(listEntry.elements) == 0 {
+		DB.Delete(key)
+	} else {
+		// Otherwise, store the updated list back
+		DB.Store(key, listEntry)
+	}
+
+	// Return the popped element
+	writeBulkString(conn, firstElement)
 }
 
 // lists elements of a list between start and stop indexes, also supporting negative indexes
