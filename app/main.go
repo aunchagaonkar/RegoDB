@@ -28,7 +28,7 @@ type ListEntry struct {
 type BlockedClient struct {
 	conn      net.Conn
 	listKey   string
-	timeout   int
+	timeout   float64
 	startTime time.Time
 	done      chan struct{} // channel to signal when client should stop blocking
 }
@@ -505,10 +505,11 @@ func handleBLPop(args []string, conn net.Conn) {
 		return
 	}
 
-	// parse timeout (last argument)
-	timeout, err := strconv.Atoi(args[len(args)-1])
+	// parse timeout (last argument) - can be a float
+	timeoutStr := args[len(args)-1]
+	timeout, err := strconv.ParseFloat(timeoutStr, 64)
 	if err != nil {
-		writeError(conn, "timeout is not an integer")
+		writeError(conn, "timeout is not a float or out of range")
 		return
 	}
 
@@ -547,17 +548,11 @@ func handleBLPop(args []string, conn net.Conn) {
 	}
 
 	// no elements available, block the client
-	if timeout == 0 {
-		// block indefinitely
-		blockClient(conn, listKeys[0], timeout)
-	} else {
-		// block with timeout (for future implementation)
-		blockClient(conn, listKeys[0], timeout)
-	}
+	blockClient(conn, listKeys[0], timeout)
 }
 
 // blockClient blocks a client waiting for an element to be available
-func blockClient(conn net.Conn, listKey string, timeout int) {
+func blockClient(conn net.Conn, listKey string, timeout float64) {
 	client := &BlockedClient{
 		conn:      conn,
 		listKey:   listKey,
@@ -594,10 +589,11 @@ func blockClient(conn net.Conn, listKey string, timeout int) {
 			<-client.done
 		} else {
 			// block with timeout
+			timeoutDuration := time.Duration(timeout * float64(time.Second))
 			select {
 			case <-client.done:
 				// element became available
-			case <-time.After(time.Duration(timeout) * time.Second):
+			case <-time.After(timeoutDuration):
 				// timeout reached, send null response
 				writeNullBulkString(conn)
 			}
