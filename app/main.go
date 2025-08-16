@@ -24,7 +24,20 @@ type ListEntry struct {
 	expiresAt time.Time
 }
 
+// BlockedClient represents a client blocked on BLPOP
+type BlockedClient struct {
+	conn      net.Conn
+	listKey   string
+	timeout   int
+	startTime time.Time
+	done      chan struct{} // channel to signal when client should stop blocking
+}
+
 var DB sync.Map
+
+// blockedClients stores clients blocked on BLPOP, organized by list key
+var blockedClients = make(map[string][]*BlockedClient)
+var blockedClientsMutex sync.RWMutex
 
 func Start() {
 	DB = sync.Map{}
@@ -44,6 +57,7 @@ var commandHandlers = map[string]CommandHandler{
 	"LLEN":   handleLLen,
 	"LPUSH":  handleLPush,
 	"LPOP":   handleLPop,
+	"BLPOP":  handleBLPop,
 }
 
 // RESP protocol response helpers
@@ -277,6 +291,9 @@ func handleRPush(args []string, conn net.Conn) {
 
 	DB.Store(key, listEntry)
 
+	// Notify any blocked clients waiting for this list
+	notifyBlockedClients(key)
+
 	// return the number of elements in the list
 	writeInteger(conn, len(listEntry.elements))
 }
@@ -311,6 +328,9 @@ func handleLPush(args []string, conn net.Conn) {
 	}
 
 	DB.Store(key, listEntry)
+
+	// Notify any blocked clients waiting for this list
+	notifyBlockedClients(key)
 
 	// return the number of elements in the list
 	writeInteger(conn, len(listEntry.elements))
@@ -476,4 +496,160 @@ func handleLLen(args []string, conn net.Conn) {
 		return
 	}
 	writeInteger(conn, len(listEntry.elements))
+}
+
+// handleBLPop implements the blocking list pop command
+func handleBLPop(args []string, conn net.Conn) {
+	if len(args) < 3 {
+		writeError(conn, "wrong number of arguments for 'blpop' command")
+		return
+	}
+
+	// parse timeout (last argument)
+	timeout, err := strconv.Atoi(args[len(args)-1])
+	if err != nil {
+		writeError(conn, "timeout is not an integer")
+		return
+	}
+
+	// extract list keys (all arguments except the last one which is timeout)
+	listKeys := args[1 : len(args)-1]
+
+	// try to pop from any of the specified lists immediately
+	for _, key := range listKeys {
+		value, exists := DB.Load(key)
+		if !exists {
+			continue
+		}
+
+		listEntry, ok := value.(ListEntry)
+		if !ok {
+			writeError(conn, "WRONGTYPE Operation against a key holding the wrong kind of value")
+			return
+		}
+
+		if len(listEntry.elements) > 0 {
+			// pop the first element
+			poppedElement := listEntry.elements[0]
+			listEntry.elements = listEntry.elements[1:]
+
+			// update or delete the list
+			if len(listEntry.elements) == 0 {
+				DB.Delete(key)
+			} else {
+				DB.Store(key, listEntry)
+			}
+
+			// return the result immediately
+			writeArray(conn, []string{key, poppedElement})
+			return
+		}
+	}
+
+	// no elements available, block the client
+	if timeout == 0 {
+		// block indefinitely
+		blockClient(conn, listKeys[0], timeout)
+	} else {
+		// block with timeout (for future implementation)
+		blockClient(conn, listKeys[0], timeout)
+	}
+}
+
+// blockClient blocks a client waiting for an element to be available
+func blockClient(conn net.Conn, listKey string, timeout int) {
+	client := &BlockedClient{
+		conn:      conn,
+		listKey:   listKey,
+		timeout:   timeout,
+		startTime: time.Now(),
+		done:      make(chan struct{}),
+	}
+
+	// add client to blocked clients list
+	blockedClientsMutex.Lock()
+	blockedClients[listKey] = append(blockedClients[listKey], client)
+	blockedClientsMutex.Unlock()
+
+	// start a goroutine to handle the blocking
+	go func() {
+		defer func() {
+			// remove client from blocked clients when done
+			blockedClientsMutex.Lock()
+			clients := blockedClients[listKey]
+			for i, c := range clients {
+				if c == client {
+					blockedClients[listKey] = append(clients[:i], clients[i+1:]...)
+					if len(blockedClients[listKey]) == 0 {
+						delete(blockedClients, listKey)
+					}
+					break
+				}
+			}
+			blockedClientsMutex.Unlock()
+		}()
+
+		if timeout == 0 {
+			// block indefinitely
+			<-client.done
+		} else {
+			// block with timeout
+			select {
+			case <-client.done:
+				// element became available
+			case <-time.After(time.Duration(timeout) * time.Second):
+				// timeout reached, send null response
+				writeNullBulkString(conn)
+			}
+		}
+	}()
+}
+
+// notifyBlockedClients checks if there are blocked clients waiting for the given list key
+// and notifies the longest-waiting client
+func notifyBlockedClients(listKey string) {
+	blockedClientsMutex.Lock()
+	defer blockedClientsMutex.Unlock()
+
+	clients, exists := blockedClients[listKey]
+	if !exists || len(clients) == 0 {
+		return
+	}
+
+	// find the longest-waiting client (first in the slice)
+	client := clients[0]
+
+	// try to pop an element for this client
+	value, exists := DB.Load(listKey)
+	if !exists {
+		return
+	}
+
+	listEntry, ok := value.(ListEntry)
+	if !ok || len(listEntry.elements) == 0 {
+		return
+	}
+
+	// pop the first element
+	poppedElement := listEntry.elements[0]
+	listEntry.elements = listEntry.elements[1:]
+
+	// update or delete the list
+	if len(listEntry.elements) == 0 {
+		DB.Delete(listKey)
+	} else {
+		DB.Store(listKey, listEntry)
+	}
+
+	// send response to the blocked client
+	writeArray(client.conn, []string{listKey, poppedElement})
+
+	// remove client from blocked clients list
+	blockedClients[listKey] = clients[1:]
+	if len(blockedClients[listKey]) == 0 {
+		delete(blockedClients, listKey)
+	}
+
+	// signal the client to stop blocking
+	close(client.done)
 }
