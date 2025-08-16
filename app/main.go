@@ -43,7 +43,7 @@ var commandHandlers = map[string]CommandHandler{
 	"LRANGE": handleLRange,
 	"LLEN":   handleLLen,
 	"LPUSH":  handleLPush,
-	"LPOP":   handleLPop, // Add LPOP handler
+	"LPOP":   handleLPop,
 }
 
 // RESP protocol response helpers
@@ -318,16 +318,34 @@ func handleLPush(args []string, conn net.Conn) {
 
 // handleLPop removes and returns the first element of a list
 func handleLPop(args []string, conn net.Conn) {
-	if len(args) != 2 {
+	if len(args) < 2 || len(args) > 3 {
 		writeError(conn, "wrong number of arguments for 'lpop' command")
 		return
 	}
+
 	key := args[1]
+	count := 1 // default count is 1
+
+	// parse optional count parameter
+	if len(args) == 3 {
+		var err error
+		count, err = strconv.Atoi(args[2])
+		if err != nil || count < 0 {
+			writeError(conn, "value is not an integer or out of range")
+			return
+		}
+	}
 
 	// retrieve the list from the DB
 	value, exists := DB.Load(key)
 	if !exists {
-		writeNullBulkString(conn)
+		if len(args) == 3 {
+			// when count is specified and key doesn't exist, return empty array
+			writeArray(conn, []string{})
+		} else {
+			// when no count specified and key doesn't exist, return null
+			writeNullBulkString(conn)
+		}
 		return
 	}
 
@@ -337,17 +355,26 @@ func handleLPop(args []string, conn net.Conn) {
 		return
 	}
 
-	// if the list is empty, return null
+	// if the list is empty
 	if len(listEntry.elements) == 0 {
-		writeNullBulkString(conn)
+		if len(args) == 3 {
+			// when count is specified and list is empty, return empty array
+			writeArray(conn, []string{})
+		} else {
+			// when no count specified and list is empty, return null
+			writeNullBulkString(conn)
+		}
 		return
 	}
 
-	// get the first element to return
-	firstElement := listEntry.elements[0]
+	// determine how many elements to actually remove
+	elementsToRemove := min(count, len(listEntry.elements))
 
-	// remove the first element from the slice
-	listEntry.elements = listEntry.elements[1:]
+	// get the elements to return
+	removedElements := listEntry.elements[:elementsToRemove]
+
+	// remove the elements from the slice
+	listEntry.elements = listEntry.elements[elementsToRemove:]
 
 	// if the list becomes empty after popping, remove the key from the DB
 	if len(listEntry.elements) == 0 {
@@ -357,8 +384,14 @@ func handleLPop(args []string, conn net.Conn) {
 		DB.Store(key, listEntry)
 	}
 
-	// Return the popped element
-	writeBulkString(conn, firstElement)
+	// return response based on whether count was specified
+	if len(args) == 3 {
+		// when count is specified, always return an array
+		writeArray(conn, removedElements)
+	} else {
+		// when no count specified, return single bulk string
+		writeBulkString(conn, removedElements[0])
+	}
 }
 
 // lists elements of a list between start and stop indexes, also supporting negative indexes
