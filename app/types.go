@@ -18,6 +18,18 @@ type ListEntry struct {
 	expiresAt time.Time
 }
 
+// StreamEntry represents a Redis stream data structure
+type StreamEntry struct {
+	entries   []StreamEntryData
+	expiresAt time.Time
+}
+
+// StreamEntryData represents a single entry within a stream
+type StreamEntryData struct {
+	id   string
+	data map[string]string // key-value pairs for the entry
+}
+
 // BlockedClient represents a client blocked on BLPOP
 type BlockedClient struct {
 	conn      net.Conn

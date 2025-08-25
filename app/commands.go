@@ -20,6 +20,7 @@ var commandHandlers = map[string]CommandHandler{
 	"LPUSH":  handleLPush,
 	"LPOP":   handleLPop,
 	"BLPOP":  handleBLPop,
+	"XADD":   handleXAdd,
 }
 
 // Command handlers
@@ -112,6 +113,8 @@ func handleType(args []string, conn net.Conn) {
 		writeSimpleString(conn, "string")
 	case ListEntry:
 		writeSimpleString(conn, "list")
+	case StreamEntry:
+		writeSimpleString(conn, "stream")
 	default:
 		// unknown type
 		writeSimpleString(conn, "none")
@@ -405,4 +408,61 @@ func handleBLPop(args []string, conn net.Conn) {
 
 	// no elements available, block the client
 	blockClient(conn, listKeys[0], timeout)
+}
+
+// handleXAdd implements the XADD command for Redis streams
+func handleXAdd(args []string, conn net.Conn) {
+	if len(args) < 4 {
+		writeError(conn, "wrong number of arguments for 'xadd' command")
+		return
+	}
+
+	// XADD syntax: XADD key ID field value [field value ...]
+	key := args[1]
+	entryID := args[2]
+
+	// Check if we have an even number of field-value pairs
+	if (len(args)-3)%2 != 0 {
+		writeError(conn, "wrong number of arguments for 'xadd' command")
+		return
+	}
+
+	// Parse field-value pairs
+	data := make(map[string]string)
+	for i := 3; i < len(args); i += 2 {
+		field := args[i]
+		value := args[i+1]
+		data[field] = value
+	}
+
+	// Get or create the stream
+	value, exists := DB.Load(key)
+	var streamEntry StreamEntry
+
+	if exists {
+		var ok bool
+		streamEntry, ok = value.(StreamEntry)
+		if !ok {
+			writeError(conn, "WRONGTYPE Operation against a key holding the wrong kind of value")
+			return
+		}
+	} else {
+		// key doesn't exist, create new stream
+		streamEntry = StreamEntry{entries: make([]StreamEntryData, 0)}
+	}
+
+	// Create new stream entry data
+	newEntry := StreamEntryData{
+		id:   entryID,
+		data: data,
+	}
+
+	// Add the entry to the stream
+	streamEntry.entries = append(streamEntry.entries, newEntry)
+
+	// Store the updated stream
+	DB.Store(key, streamEntry)
+
+	// Return the entry ID as a bulk string
+	writeBulkString(conn, entryID)
 }
