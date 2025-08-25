@@ -13,6 +13,7 @@ var commandHandlers = map[string]CommandHandler{
 	"ECHO":   handleEcho,
 	"SET":    handleSet,
 	"GET":    handleGet,
+	"TYPE":   handleType,
 	"RPUSH":  handleRPush,
 	"LRANGE": handleLRange,
 	"LLEN":   handleLLen,
@@ -84,6 +85,37 @@ func handleGet(args []string, conn net.Conn) {
 	}
 
 	writeBulkString(conn, entry.value)
+}
+
+func handleType(args []string, conn net.Conn) {
+	if len(args) < 2 {
+		writeError(conn, "wrong number of arguments for 'type' command")
+		return
+	}
+
+	key := args[1]
+	value, ok := DB.Load(key)
+	if !ok {
+		writeSimpleString(conn, "none")
+		return
+	}
+
+	// determine the type based on the value's type
+	switch v := value.(type) {
+	case Entry:
+		// check if the entry has expired
+		if !v.expiresAt.IsZero() && time.Now().After(v.expiresAt) {
+			DB.Delete(key)
+			writeSimpleString(conn, "none")
+			return
+		}
+		writeSimpleString(conn, "string")
+	case ListEntry:
+		writeSimpleString(conn, "list")
+	default:
+		// unknown type
+		writeSimpleString(conn, "none")
+	}
 }
 
 func handleRPush(args []string, conn net.Conn) {
