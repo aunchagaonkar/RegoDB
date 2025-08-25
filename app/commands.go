@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -410,6 +411,59 @@ func handleBLPop(args []string, conn net.Conn) {
 	blockClient(conn, listKeys[0], timeout)
 }
 
+// parseEntryID parses an entry ID string into timestamp and sequence number
+func parseEntryID(idStr string) (int64, int64, error) {
+	parts := strings.Split(idStr, "-")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid entry ID format")
+	}
+
+	timestamp, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid timestamp in entry ID")
+	}
+
+	sequence, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid sequence number in entry ID")
+	}
+
+	return timestamp, sequence, nil
+}
+
+// validateEntryID validates that the new entry ID is valid according to Redis rules
+func validateEntryID(newID string, stream StreamEntry) error {
+	newTimestamp, newSequence, err := parseEntryID(newID)
+	if err != nil {
+		return err
+	}
+
+	// check if ID is greater than 0-0
+	if newTimestamp == 0 && newSequence == 0 {
+		return fmt.Errorf("The ID specified in XADD must be greater than 0-0")
+	}
+
+	// if stream is empty, any valid ID > 0-0 is acceptable
+	if len(stream.entries) == 0 {
+		return nil
+	}
+
+	// get the last entry ID
+	lastEntry := stream.entries[len(stream.entries)-1]
+	lastTimestamp, lastSequence, err := parseEntryID(lastEntry.id)
+	if err != nil {
+		return err
+	}
+
+	// check if new ID is greater than last ID
+	if newTimestamp < lastTimestamp ||
+		(newTimestamp == lastTimestamp && newSequence <= lastSequence) {
+		return fmt.Errorf("The ID specified in XADD is equal or smaller than the target stream top item")
+	}
+
+	return nil
+}
+
 // handleXAdd implements the XADD command for Redis streams
 func handleXAdd(args []string, conn net.Conn) {
 	if len(args) < 4 {
@@ -449,6 +503,12 @@ func handleXAdd(args []string, conn net.Conn) {
 	} else {
 		// key doesn't exist, create new stream
 		streamEntry = StreamEntry{entries: make([]StreamEntryData, 0)}
+	}
+
+	// Validate the entry ID
+	if err := validateEntryID(entryID, streamEntry); err != nil {
+		writeError(conn, err.Error())
+		return
 	}
 
 	// Create new stream entry data
