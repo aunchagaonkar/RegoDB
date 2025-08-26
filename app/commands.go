@@ -542,8 +542,14 @@ func handleXAdd(args []string, conn net.Conn) {
 		streamEntry = StreamEntry{entries: make([]StreamEntryData, 0)}
 	}
 
-	// handle auto-generation of sequence number
-	if strings.Contains(entryID, "*") {
+	// handle auto-generation of entry ID
+	if entryID == "*" {
+		// full auto-generation: use current time in milliseconds and sequence 0
+		timestamp := time.Now().UnixMilli()
+		sequence := generateSequenceNumber(timestamp, streamEntry)
+		entryID = fmt.Sprintf("%d-%d", timestamp, sequence)
+	} else if strings.Contains(entryID, "*") {
+		// partial auto-generation: timestamp provided, generate sequence number
 		parts := strings.Split(entryID, "-")
 		if len(parts) != 2 || parts[1] != "*" {
 			writeError(conn, "invalid entry ID format")
