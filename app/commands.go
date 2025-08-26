@@ -464,6 +464,43 @@ func validateEntryID(newID string, stream StreamEntry) error {
 	return nil
 }
 
+// generateSequenceNumber generates the sequence number for auto-generation
+func generateSequenceNumber(timestamp int64, stream StreamEntry) int64 {
+	// special case: if timestamp is 0, default sequence number is 1
+	if timestamp == 0 {
+		maxSequence := int64(0)
+		for _, entry := range stream.entries {
+			entryTimestamp, entrySequence, err := parseEntryID(entry.id)
+			if err != nil {
+				continue
+			}
+			if entryTimestamp == 0 && entrySequence > maxSequence {
+				maxSequence = entrySequence
+			}
+		}
+		return maxSequence + 1
+	}
+
+	// for other timestamps, find the highest sequence number for this timestamp
+	maxSequence := int64(-1)
+	for _, entry := range stream.entries {
+		entryTimestamp, entrySequence, err := parseEntryID(entry.id)
+		if err != nil {
+			continue
+		}
+		if entryTimestamp == timestamp && entrySequence > maxSequence {
+			maxSequence = entrySequence
+		}
+	}
+
+	// if no entries found for this timestamp, start with 0
+	if maxSequence == -1 {
+		return 0
+	}
+
+	return maxSequence + 1
+}
+
 // handleXAdd implements the XADD command for Redis streams
 func handleXAdd(args []string, conn net.Conn) {
 	if len(args) < 4 {
@@ -503,6 +540,25 @@ func handleXAdd(args []string, conn net.Conn) {
 	} else {
 		// key doesn't exist, create new stream
 		streamEntry = StreamEntry{entries: make([]StreamEntryData, 0)}
+	}
+
+	// handle auto-generation of sequence number
+	if strings.Contains(entryID, "*") {
+		parts := strings.Split(entryID, "-")
+		if len(parts) != 2 || parts[1] != "*" {
+			writeError(conn, "invalid entry ID format")
+			return
+		}
+
+		timestamp, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			writeError(conn, "invalid timestamp in entry ID")
+			return
+		}
+
+		// generate the sequence number
+		sequence := generateSequenceNumber(timestamp, streamEntry)
+		entryID = fmt.Sprintf("%d-%d", timestamp, sequence)
 	}
 
 	// Validate the entry ID
