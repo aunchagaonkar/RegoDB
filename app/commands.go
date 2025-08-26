@@ -22,6 +22,7 @@ var commandHandlers = map[string]CommandHandler{
 	"LPOP":   handleLPop,
 	"BLPOP":  handleBLPop,
 	"XADD":   handleXAdd,
+	"XRANGE": handleXRange,
 }
 
 // Command handlers
@@ -587,4 +588,116 @@ func handleXAdd(args []string, conn net.Conn) {
 
 	// Return the entry ID as a bulk string
 	writeBulkString(conn, entryID)
+}
+
+// compareEntryIDs compares two entry IDs
+// Returns -1 if id1 < id2, 0 if id1 == id2, 1 if id1 > id2
+func compareEntryIDs(id1, id2 string) (int, error) {
+	timestamp1, sequence1, err := parseEntryID(id1)
+	if err != nil {
+		return 0, err
+	}
+
+	timestamp2, sequence2, err := parseEntryID(id2)
+	if err != nil {
+		return 0, err
+	}
+
+	if timestamp1 < timestamp2 {
+		return -1, nil
+	} else if timestamp1 > timestamp2 {
+		return 1, nil
+	} else {
+		// timestamps are equal, compare sequence numbers
+		if sequence1 < sequence2 {
+			return -1, nil
+		} else if sequence1 > sequence2 {
+			return 1, nil
+		} else {
+			return 0, nil
+		}
+	}
+}
+
+// normalizeEntryID normalizes an entry ID by adding default sequence number if missing
+func normalizeEntryID(id string, isEnd bool) string {
+	if !strings.Contains(id, "-") {
+		if isEnd {
+			// For end range, use maximum sequence number
+			return id + "-18446744073709551615" // max uint64
+		} else {
+			// For start range, use sequence number 0
+			return id + "-0"
+		}
+	}
+	return id
+}
+
+// handleXRange implements the XRANGE command for Redis streams
+func handleXRange(args []string, conn net.Conn) {
+	if len(args) != 4 {
+		writeError(conn, "wrong number of arguments for 'xrange' command")
+		return
+	}
+
+	key := args[1]
+	startID := args[2]
+	endID := args[3]
+
+	// get the stream
+	value, exists := DB.Load(key)
+	if !exists {
+		// stream doesn't exist, return empty array
+		writeArrayHeader(conn, 0)
+		return
+	}
+
+	streamEntry, ok := value.(StreamEntry)
+	if !ok {
+		writeError(conn, "WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+
+	// normalize the start and end IDs (add sequence numbers if missing)
+	startID = normalizeEntryID(startID, false)
+	endID = normalizeEntryID(endID, true)
+
+	// find entries within the range
+	var result []StreamEntryData
+	for _, entry := range streamEntry.entries {
+		// check if entry is within range
+		startComp, err := compareEntryIDs(entry.id, startID)
+		if err != nil {
+			writeError(conn, "invalid start entry ID format")
+			return
+		}
+
+		endComp, err := compareEntryIDs(entry.id, endID)
+		if err != nil {
+			writeError(conn, "invalid end entry ID format")
+			return
+		}
+
+		// include entry if: entry.id >= startID AND entry.id <= endID
+		if startComp >= 0 && endComp <= 0 {
+			result = append(result, entry)
+		}
+	}
+
+	// write the result as a RESP array
+	writeArrayHeader(conn, len(result))
+	for _, entry := range result {
+		// each entry is an array with 2 elements: [ID, [field1, value1, field2, value2, ...]]
+		writeArrayHeader(conn, 2)
+
+		// write the entry ID
+		writeBulkString(conn, entry.id)
+
+		// write the data as an array of field-value pairs
+		writeArrayHeader(conn, len(entry.data)*2)
+		for field, value := range entry.data {
+			writeBulkString(conn, field)
+			writeBulkString(conn, value)
+		}
+	}
 }

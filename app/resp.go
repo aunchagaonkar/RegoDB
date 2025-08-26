@@ -42,3 +42,9 @@ func writeArray(conn net.Conn, elems []string) error {
 	_, err := conn.Write([]byte(out))
 	return err
 }
+
+// writeArrayHeader writes just the array header (*count\r\n)
+func writeArrayHeader(conn net.Conn, count int) error {
+	_, err := conn.Write([]byte(fmt.Sprintf("*%d\r\n", count)))
+	return err
+}
