@@ -60,8 +60,8 @@ func blockClient(conn net.Conn, listKey string, timeout float64) {
 			case <-client.done:
 				// element became available
 			case <-time.After(timeoutDuration):
-				// timeout reached, send null response
-				writeNullBulkString(conn)
+				// timeout reached, send null array response
+				writeNullArray(conn)
 			}
 		}
 	}()

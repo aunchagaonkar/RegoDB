@@ -658,18 +658,31 @@ func handleXRange(args []string, conn net.Conn) {
 		return
 	}
 
-	// normalize the start and end IDs (add sequence numbers if missing)
-	startID = normalizeEntryID(startID, false)
+	// handle special case for "-" start ID
+	useMinStart := (startID == "-")
+	
+	// normalize the start and end IDs to add sequence numbers if missing
+	if !useMinStart {
+		startID = normalizeEntryID(startID, false)
+	}
 	endID = normalizeEntryID(endID, true)
 
 	// find entries within the range
 	var result []StreamEntryData
 	for _, entry := range streamEntry.entries {
 		// check if entry is within range
-		startComp, err := compareEntryIDs(entry.id, startID)
-		if err != nil {
-			writeError(conn, "invalid start entry ID format")
-			return
+		var startComp int
+		var err error
+		
+		if useMinStart {
+			// when start is "-", all entries satisfy the start condition
+			startComp = 1 // entry.id >= start (since start is effectively minimum)
+		} else {
+			startComp, err = compareEntryIDs(entry.id, startID)
+			if err != nil {
+				writeError(conn, "invalid start entry ID format")
+				return
+			}
 		}
 
 		endComp, err := compareEntryIDs(entry.id, endID)

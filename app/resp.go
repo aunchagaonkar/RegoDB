@@ -23,6 +23,11 @@ func writeNullBulkString(conn net.Conn) error {
 	return err
 }
 
+func writeNullArray(conn net.Conn) error {
+	_, err := conn.Write([]byte("*-1\r\n"))
+	return err
+}
+
 func writeInteger(conn net.Conn, val int) error {
 	_, err := conn.Write([]byte(fmt.Sprintf(":%d\r\n", val)))
 	return err
