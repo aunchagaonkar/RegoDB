@@ -23,6 +23,7 @@ var commandHandlers = map[string]CommandHandler{
 	"BLPOP":  handleBLPop,
 	"XADD":   handleXAdd,
 	"XRANGE": handleXRange,
+	"XREAD":  handleXRead,
 }
 
 // Command handlers
@@ -658,24 +659,47 @@ func handleXRange(args []string, conn net.Conn) {
 		return
 	}
 
-	// normalize the start and end IDs (add sequence numbers if missing)
-	startID = normalizeEntryID(startID, false)
-	endID = normalizeEntryID(endID, true)
+	// handle special case for "-" start ID
+	useMinStart := (startID == "-")
+	
+	// handle special case for "+" end ID
+	useMaxEnd := (endID == "+")
+	
+	// normalize the start and end IDs to add sequence numbers if missing
+	if !useMinStart {
+		startID = normalizeEntryID(startID, false)
+	}
+	if !useMaxEnd {
+		endID = normalizeEntryID(endID, true)
+	}
 
 	// find entries within the range
 	var result []StreamEntryData
 	for _, entry := range streamEntry.entries {
 		// check if entry is within range
-		startComp, err := compareEntryIDs(entry.id, startID)
-		if err != nil {
-			writeError(conn, "invalid start entry ID format")
-			return
+		var startComp int
+		var err error
+		
+		if useMinStart {
+			// when start is "-", all entries satisfy the start condition
+			startComp = 1 // entry.id >= start (since start is effectively minimum)
+		} else {
+			startComp, err = compareEntryIDs(entry.id, startID)
+			if err != nil {
+				writeError(conn, "invalid start entry ID format")
+				return
+			}
 		}
 
 		endComp, err := compareEntryIDs(entry.id, endID)
-		if err != nil {
+		if err != nil && !useMaxEnd {
 			writeError(conn, "invalid end entry ID format")
 			return
+		}
+
+		// when using "+", all entries satisfy the end condition
+		if useMaxEnd {
+			endComp = -1 // entry.id <= end (since end is effectively maximum)
 		}
 
 		// include entry if: entry.id >= startID AND entry.id <= endID
@@ -698,6 +722,108 @@ func handleXRange(args []string, conn net.Conn) {
 		for field, value := range entry.data {
 			writeBulkString(conn, field)
 			writeBulkString(conn, value)
+		}
+	}
+}
+
+// handleXRead implements the XREAD command for Redis streams
+func handleXRead(args []string, conn net.Conn) {
+	// XREAD streams key1 id1 [key2 id2 ...]
+	// minimum arguments: XREAD streams key id
+	if len(args) < 4 {
+		writeError(conn, "wrong number of arguments for 'xread' command")
+		return
+	}
+
+	// check if the command starts with "streams"
+	if strings.ToLower(args[1]) != "streams" {
+		writeError(conn, "wrong arguments for 'xread' command")
+		return
+	}
+
+	// Parse stream keys and IDs
+	// The format is: XREAD streams key1 key2 ... keyN id1 id2 ... idN
+	// We need to find where keys end and IDs start
+	streamArgs := args[2:] // Remove "XREAD" and "streams"
+	
+	// For simplicity, assume equal number of keys and IDs
+	// In the base case, we have: key id
+	if len(streamArgs)%2 != 0 {
+		writeError(conn, "wrong number of arguments for 'xread' command")
+		return
+	}
+
+	numStreams := len(streamArgs) / 2
+	streamKeys := streamArgs[:numStreams]
+	streamIDs := streamArgs[numStreams:]
+
+	// result array - each element is [stream_key, [[entry_id, [field1, value1, ...]], ...]]
+	var resultStreams [][]interface{}
+
+	for i := 0; i < numStreams; i++ {
+		key := streamKeys[i]
+		startID := streamIDs[i]
+
+		// get the stream
+		value, exists := DB.Load(key)
+		if !exists {
+			// stream doesn't exist, skip this stream
+			continue
+		}
+
+		streamEntry, ok := value.(StreamEntry)
+		if !ok {
+			writeError(conn, "WRONGTYPE Operation against a key holding the wrong kind of value")
+			return
+		}
+
+		// find entries with ID greater than startID (exclusive)
+		var entries []StreamEntryData
+		for _, entry := range streamEntry.entries {
+			comp, err := compareEntryIDs(entry.id, startID)
+			if err != nil {
+				writeError(conn, "invalid entry ID format")
+				return
+			}
+			// include only entries with ID > startID (comp > 0)
+			if comp > 0 {
+				entries = append(entries, entry)
+			}
+		}
+
+		// only include this stream in the result if it has entries
+		if len(entries) > 0 {
+			streamResult := []interface{}{key, entries}
+			resultStreams = append(resultStreams, streamResult)
+		}
+	}
+
+	// write the result as a RESP array
+	writeArrayHeader(conn, len(resultStreams))
+	for _, streamResult := range resultStreams {
+		// each stream result is [stream_key, [entries...]]
+		writeArrayHeader(conn, 2)
+		
+		// write stream key
+		writeBulkString(conn, streamResult[0].(string))
+
+		// write entries array
+		entries := streamResult[1].([]StreamEntryData)
+		writeArrayHeader(conn, len(entries))
+		
+		for _, entry := range entries {
+			// each entry is [entry_id, [field1, value1, field2, value2, ...]]
+			writeArrayHeader(conn, 2)
+			
+			// write entry ID
+			writeBulkString(conn, entry.id)
+
+			// write entry data as flat array
+			writeArrayHeader(conn, len(entry.data)*2)
+			for field, value := range entry.data {
+				writeBulkString(conn, field)
+				writeBulkString(conn, value)
+			}
 		}
 	}
 }
