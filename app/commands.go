@@ -788,8 +788,14 @@ func handleXRead(args []string, conn net.Conn) {
 		return
 	}
 
-	// no results and blocking requested - block the client
-	blockXReadClient(conn, streamKeys, streamIDs, blockTimeout)
+	// no results and blocking requested - resolve $ IDs before blocking
+	resolvedStreamIDs := make([]string, len(streamIDs))
+	for i, streamID := range streamIDs {
+		resolvedStreamIDs[i] = resolveStreamID(streamKeys[i], streamID)
+	}
+
+	// block the client with resolved IDs
+	blockXReadClient(conn, streamKeys, resolvedStreamIDs, blockTimeout)
 }
 
 // getXReadResults gets the results for XREAD command (shared between blocking and non-blocking)
@@ -797,7 +803,8 @@ func getXReadResults(streamKeys []string, streamIDs []string) [][]interface{} {
 	var resultStreams [][]interface{}
 
 	for i, key := range streamKeys {
-		startID := streamIDs[i]
+		// resolve special IDs like "$"
+		startID := resolveStreamID(key, streamIDs[i])
 
 		// get the stream
 		value, exists := DB.Load(key)
@@ -864,4 +871,36 @@ func writeXReadResponse(conn net.Conn, resultStreams [][]interface{}) {
 			}
 		}
 	}
+}
+
+// resolveStreamID resolves special stream IDs like "$" to actual IDs
+// "$" means the maximum entry ID currently in the stream
+func resolveStreamID(streamKey, streamID string) string {
+	if streamID != "$" {
+		return streamID
+	}
+
+	// get the stream
+	value, exists := DB.Load(streamKey)
+	if !exists {
+		// if stream doesn't exist, "$" resolves to "0-0" (meaning any new entry will be greater)
+		return "0-0"
+	}
+
+	streamEntry, ok := value.(StreamEntry)
+	if !ok || len(streamEntry.entries) == 0 {
+		// if stream is empty, "$" resolves to "0-0"
+		return "0-0"
+	}
+
+	// find the maximum entry ID in the stream
+	maxID := streamEntry.entries[0].id
+	for _, entry := range streamEntry.entries[1:] {
+		comp, err := compareEntryIDs(entry.id, maxID)
+		if err == nil && comp > 0 {
+			maxID = entry.id
+		}
+	}
+
+	return maxID
 }
