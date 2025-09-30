@@ -23,6 +23,7 @@ var commandHandlers = map[string]CommandHandler{
 	"BLPOP":  handleBLPop,
 	"XADD":   handleXAdd,
 	"XRANGE": handleXRange,
+	"XREAD":  handleXRead,
 }
 
 // Command handlers
@@ -513,13 +514,13 @@ func handleXAdd(args []string, conn net.Conn) {
 	key := args[1]
 	entryID := args[2]
 
-	// Check if we have an even number of field-value pairs
+	// check if we have an even number of field-value pairs
 	if (len(args)-3)%2 != 0 {
 		writeError(conn, "wrong number of arguments for 'xadd' command")
 		return
 	}
 
-	// Parse field-value pairs
+	// parse field-value pairs
 	data := make(map[string]string)
 	for i := 3; i < len(args); i += 2 {
 		field := args[i]
@@ -568,23 +569,26 @@ func handleXAdd(args []string, conn net.Conn) {
 		entryID = fmt.Sprintf("%d-%d", timestamp, sequence)
 	}
 
-	// Validate the entry ID
+	// validate the entry ID
 	if err := validateEntryID(entryID, streamEntry); err != nil {
 		writeError(conn, err.Error())
 		return
 	}
 
-	// Create new stream entry data
+	// create new stream entry data
 	newEntry := StreamEntryData{
 		id:   entryID,
 		data: data,
 	}
 
-	// Add the entry to the stream
+	// add the entry to the stream
 	streamEntry.entries = append(streamEntry.entries, newEntry)
 
-	// Store the updated stream
+	// store the updated stream
 	DB.Store(key, streamEntry)
+
+	// notify blocked XREAD clients
+	notifyBlockedXReadClients(key, entryID)
 
 	// Return the entry ID as a bulk string
 	writeBulkString(conn, entryID)
@@ -723,4 +727,180 @@ func handleXRange(args []string, conn net.Conn) {
 			writeBulkString(conn, value)
 		}
 	}
+}
+
+// handleXRead implements the XREAD command for Redis streams
+func handleXRead(args []string, conn net.Conn) {
+	// XREAD [BLOCK timeout] streams key1 id1 [key2 id2 ...]
+	// minimum arguments: XREAD streams key id
+	if len(args) < 4 {
+		writeError(conn, "wrong number of arguments for 'xread' command")
+		return
+	}
+
+	var blockTimeout float64 = -1 // -1 means no blocking
+	argIndex := 1
+
+	// check for BLOCK parameter
+	if strings.ToLower(args[argIndex]) == "block" {
+		if len(args) < 6 { // XREAD BLOCK timeout streams key id
+			writeError(conn, "wrong number of arguments for 'xread' command")
+			return
+		}
+		
+		var err error
+		blockTimeout, err = strconv.ParseFloat(args[argIndex+1], 64)
+		if err != nil {
+			writeError(conn, "timeout is not a valid integer")
+			return
+		}
+		
+		argIndex += 2 // skip BLOCK and timeout
+	}
+
+	// check if the next argument is "streams"
+	if strings.ToLower(args[argIndex]) != "streams" {
+		writeError(conn, "wrong arguments for 'xread' command")
+		return
+	}
+	argIndex++ // skip "streams"
+
+	// Parse stream keys and IDs
+	// The format is: XREAD [BLOCK timeout] streams key1 key2 ... keyN id1 id2 ... idN
+	streamArgs := args[argIndex:] // Remove processed arguments
+	
+	// For simplicity, assume equal number of keys and IDs
+	if len(streamArgs)%2 != 0 {
+		writeError(conn, "wrong number of arguments for 'xread' command")
+		return
+	}
+
+	numStreams := len(streamArgs) / 2
+	streamKeys := streamArgs[:numStreams]
+	streamIDs := streamArgs[numStreams:]
+
+	// first, try to get entries immediately (non-blocking check)
+	resultStreams := getXReadResults(streamKeys, streamIDs)
+	
+	// if we have results or not blocking, return immediately
+	if len(resultStreams) > 0 || blockTimeout < 0 {
+		writeXReadResponse(conn, resultStreams)
+		return
+	}
+
+	// no results and blocking requested - resolve $ IDs before blocking
+	resolvedStreamIDs := make([]string, len(streamIDs))
+	for i, streamID := range streamIDs {
+		resolvedStreamIDs[i] = resolveStreamID(streamKeys[i], streamID)
+	}
+
+	// block the client with resolved IDs
+	blockXReadClient(conn, streamKeys, resolvedStreamIDs, blockTimeout)
+}
+
+// getXReadResults gets the results for XREAD command (shared between blocking and non-blocking)
+func getXReadResults(streamKeys []string, streamIDs []string) [][]interface{} {
+	var resultStreams [][]interface{}
+
+	for i, key := range streamKeys {
+		// resolve special IDs like "$"
+		startID := resolveStreamID(key, streamIDs[i])
+
+		// get the stream
+		value, exists := DB.Load(key)
+		if !exists {
+			// stream doesn't exist, skip this stream
+			continue
+		}
+
+		streamEntry, ok := value.(StreamEntry)
+		if !ok {
+			continue
+		}
+
+		// find entries with ID greater than startID (exclusive)
+		var entries []StreamEntryData
+		for _, entry := range streamEntry.entries {
+			comp, err := compareEntryIDs(entry.id, startID)
+			if err != nil {
+				continue
+			}
+			// include only entries with ID > startID (comp > 0)
+			if comp > 0 {
+				entries = append(entries, entry)
+			}
+		}
+
+		// only include this stream in the result if it has entries
+		if len(entries) > 0 {
+			streamResult := []interface{}{key, entries}
+			resultStreams = append(resultStreams, streamResult)
+		}
+	}
+
+	return resultStreams
+}
+
+// writeXReadResponse writes the XREAD response to the connection
+func writeXReadResponse(conn net.Conn, resultStreams [][]interface{}) {
+	// write the result as a RESP array
+	writeArrayHeader(conn, len(resultStreams))
+	for _, streamResult := range resultStreams {
+		// each stream result is [stream_key, [entries...]]
+		writeArrayHeader(conn, 2)
+		
+		// write stream key
+		writeBulkString(conn, streamResult[0].(string))
+
+		// write entries array
+		entries := streamResult[1].([]StreamEntryData)
+		writeArrayHeader(conn, len(entries))
+		
+		for _, entry := range entries {
+			// each entry is [entry_id, [field1, value1, field2, value2, ...]]
+			writeArrayHeader(conn, 2)
+			
+			// write entry ID
+			writeBulkString(conn, entry.id)
+
+			// write entry data as flat array
+			writeArrayHeader(conn, len(entry.data)*2)
+			for field, value := range entry.data {
+				writeBulkString(conn, field)
+				writeBulkString(conn, value)
+			}
+		}
+	}
+}
+
+// resolveStreamID resolves special stream IDs like "$" to actual IDs
+// "$" means the maximum entry ID currently in the stream
+func resolveStreamID(streamKey, streamID string) string {
+	if streamID != "$" {
+		return streamID
+	}
+
+	// get the stream
+	value, exists := DB.Load(streamKey)
+	if !exists {
+		// if stream doesn't exist, "$" resolves to "0-0" (meaning any new entry will be greater)
+		return "0-0"
+	}
+
+	streamEntry, ok := value.(StreamEntry)
+	if !ok || len(streamEntry.entries) == 0 {
+		// if stream is empty, "$" resolves to "0-0"
+		return "0-0"
+	}
+
+	// find the maximum entry ID in the stream
+	maxID := streamEntry.entries[0].id
+	for _, entry := range streamEntry.entries[1:] {
+		comp, err := compareEntryIDs(entry.id, maxID)
+		if err == nil && comp > 0 {
+			maxID = entry.id
+		}
+	}
+
+	return maxID
 }
