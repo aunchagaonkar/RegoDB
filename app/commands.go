@@ -514,13 +514,13 @@ func handleXAdd(args []string, conn net.Conn) {
 	key := args[1]
 	entryID := args[2]
 
-	// Check if we have an even number of field-value pairs
+	// check if we have an even number of field-value pairs
 	if (len(args)-3)%2 != 0 {
 		writeError(conn, "wrong number of arguments for 'xadd' command")
 		return
 	}
 
-	// Parse field-value pairs
+	// parse field-value pairs
 	data := make(map[string]string)
 	for i := 3; i < len(args); i += 2 {
 		field := args[i]
@@ -569,23 +569,26 @@ func handleXAdd(args []string, conn net.Conn) {
 		entryID = fmt.Sprintf("%d-%d", timestamp, sequence)
 	}
 
-	// Validate the entry ID
+	// validate the entry ID
 	if err := validateEntryID(entryID, streamEntry); err != nil {
 		writeError(conn, err.Error())
 		return
 	}
 
-	// Create new stream entry data
+	// create new stream entry data
 	newEntry := StreamEntryData{
 		id:   entryID,
 		data: data,
 	}
 
-	// Add the entry to the stream
+	// add the entry to the stream
 	streamEntry.entries = append(streamEntry.entries, newEntry)
 
-	// Store the updated stream
+	// store the updated stream
 	DB.Store(key, streamEntry)
+
+	// notify blocked XREAD clients
+	notifyBlockedXReadClients(key, entryID)
 
 	// Return the entry ID as a bulk string
 	writeBulkString(conn, entryID)
@@ -728,26 +731,45 @@ func handleXRange(args []string, conn net.Conn) {
 
 // handleXRead implements the XREAD command for Redis streams
 func handleXRead(args []string, conn net.Conn) {
-	// XREAD streams key1 id1 [key2 id2 ...]
+	// XREAD [BLOCK timeout] streams key1 id1 [key2 id2 ...]
 	// minimum arguments: XREAD streams key id
 	if len(args) < 4 {
 		writeError(conn, "wrong number of arguments for 'xread' command")
 		return
 	}
 
-	// check if the command starts with "streams"
-	if strings.ToLower(args[1]) != "streams" {
+	var blockTimeout float64 = -1 // -1 means no blocking
+	argIndex := 1
+
+	// check for BLOCK parameter
+	if strings.ToLower(args[argIndex]) == "block" {
+		if len(args) < 6 { // XREAD BLOCK timeout streams key id
+			writeError(conn, "wrong number of arguments for 'xread' command")
+			return
+		}
+		
+		var err error
+		blockTimeout, err = strconv.ParseFloat(args[argIndex+1], 64)
+		if err != nil {
+			writeError(conn, "timeout is not a valid integer")
+			return
+		}
+		
+		argIndex += 2 // skip BLOCK and timeout
+	}
+
+	// check if the next argument is "streams"
+	if strings.ToLower(args[argIndex]) != "streams" {
 		writeError(conn, "wrong arguments for 'xread' command")
 		return
 	}
+	argIndex++ // skip "streams"
 
 	// Parse stream keys and IDs
-	// The format is: XREAD streams key1 key2 ... keyN id1 id2 ... idN
-	// We need to find where keys end and IDs start
-	streamArgs := args[2:] // Remove "XREAD" and "streams"
+	// The format is: XREAD [BLOCK timeout] streams key1 key2 ... keyN id1 id2 ... idN
+	streamArgs := args[argIndex:] // Remove processed arguments
 	
 	// For simplicity, assume equal number of keys and IDs
-	// In the base case, we have: key id
 	if len(streamArgs)%2 != 0 {
 		writeError(conn, "wrong number of arguments for 'xread' command")
 		return
@@ -757,11 +779,24 @@ func handleXRead(args []string, conn net.Conn) {
 	streamKeys := streamArgs[:numStreams]
 	streamIDs := streamArgs[numStreams:]
 
-	// result array - each element is [stream_key, [[entry_id, [field1, value1, ...]], ...]]
+	// first, try to get entries immediately (non-blocking check)
+	resultStreams := getXReadResults(streamKeys, streamIDs)
+	
+	// if we have results or not blocking, return immediately
+	if len(resultStreams) > 0 || blockTimeout < 0 {
+		writeXReadResponse(conn, resultStreams)
+		return
+	}
+
+	// no results and blocking requested - block the client
+	blockXReadClient(conn, streamKeys, streamIDs, blockTimeout)
+}
+
+// getXReadResults gets the results for XREAD command (shared between blocking and non-blocking)
+func getXReadResults(streamKeys []string, streamIDs []string) [][]interface{} {
 	var resultStreams [][]interface{}
 
-	for i := 0; i < numStreams; i++ {
-		key := streamKeys[i]
+	for i, key := range streamKeys {
 		startID := streamIDs[i]
 
 		// get the stream
@@ -773,8 +808,7 @@ func handleXRead(args []string, conn net.Conn) {
 
 		streamEntry, ok := value.(StreamEntry)
 		if !ok {
-			writeError(conn, "WRONGTYPE Operation against a key holding the wrong kind of value")
-			return
+			continue
 		}
 
 		// find entries with ID greater than startID (exclusive)
@@ -782,8 +816,7 @@ func handleXRead(args []string, conn net.Conn) {
 		for _, entry := range streamEntry.entries {
 			comp, err := compareEntryIDs(entry.id, startID)
 			if err != nil {
-				writeError(conn, "invalid entry ID format")
-				return
+				continue
 			}
 			// include only entries with ID > startID (comp > 0)
 			if comp > 0 {
@@ -798,6 +831,11 @@ func handleXRead(args []string, conn net.Conn) {
 		}
 	}
 
+	return resultStreams
+}
+
+// writeXReadResponse writes the XREAD response to the connection
+func writeXReadResponse(conn net.Conn, resultStreams [][]interface{}) {
 	// write the result as a RESP array
 	writeArrayHeader(conn, len(resultStreams))
 	for _, streamResult := range resultStreams {

@@ -39,5 +39,15 @@ type BlockedClient struct {
 	done      chan struct{} // channel to signal when client should stop blocking
 }
 
+// BlockedXReadClient represents a client blocked on XREAD
+type BlockedXReadClient struct {
+	conn       net.Conn
+	streamKeys []string
+	streamIDs  []string
+	timeout    float64
+	startTime  time.Time
+	done       chan struct{} // channel to signal when client should stop blocking
+}
+
 // CommandHandler defines the signature for all command handler functions
 type CommandHandler func(args []string, conn net.Conn)
